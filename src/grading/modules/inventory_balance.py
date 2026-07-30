@@ -1,10 +1,13 @@
 from decimal import Decimal
 from typing import Any, Dict
+
 from src.grading.base import BaseModuleComparator, CompareResult
-from src.answer.models import MasterAnswerData, InventoryAnswer
+from src.answer.models import InventoryAnswer, MasterAnswerData
+from src.grading.context import GradingContext
+
 
 class InventoryBalanceComparator(BaseModuleComparator):
-    """Phân hệ 1: Chấm số dư hàng tồn kho mở đầu (InventoryLedger WHERE RefNo='opn')."""
+    """Chấm số dư đầu kỳ từ cùng canonical line model với entity resolver."""
 
     @property
     def module_id(self) -> str:
@@ -14,58 +17,75 @@ class InventoryBalanceComparator(BaseModuleComparator):
     def display_name(self) -> str:
         return "Số dư hàng tồn kho"
 
-    def compare(self, master_answer: MasterAnswerData, student_data: Dict[str, Any], tolerance: float = 1.0) -> CompareResult:
-        ans = master_answer.inventory or InventoryAnswer()
-        
-        # Student raw data for inventory_balance
-        st_rows = student_data.get("inventory_balance", [])
-        st_count = st_rows[0].get("item_count", 0) if st_rows else 0
-        st_qty = Decimal(str(st_rows[0].get("total_qty", 0) or 0)) if st_rows else Decimal('0')
-        st_amt = Decimal(str(st_rows[0].get("total_amount", 0) or 0)) if st_rows else Decimal('0')
+    def compare(
+        self,
+        master_answer: MasterAnswerData,
+        student_data: Dict[str, Any],
+        tolerance: float = 1.0,
+    ) -> CompareResult:
+        answer = master_answer.inventory or InventoryAnswer()
+        context = student_data.get("_grading_context")
 
-        details = []
-        matched = 0
-        total_checks = 3
+        if isinstance(context, GradingContext):
+            rows = context.student_graph.opening_balances
+            student_count = len(
+                {row.entity_id for row in rows if row.entity_id}
+            )
+            student_quantity = sum(
+                (row.quantity for row in rows), Decimal("0")
+            )
+            student_amount = sum(
+                (row.amount for row in rows), Decimal("0")
+            )
+        else:
+            raw_rows = student_data.get("inventory_balance", [])
+            first = raw_rows[0] if raw_rows else {}
+            student_count = int(first.get("item_count", 0) or 0)
+            student_quantity = Decimal(
+                str(first.get("total_qty", 0) or 0)
+            )
+            student_amount = Decimal(
+                str(first.get("total_amount", 0) or 0)
+            )
 
-        # Check 1: Count
-        count_ok = (st_count == ans.item_count)
-        if count_ok: matched += 1
-        details.append({
-            "field": "Số lượng mặt hàng",
-            "answer": ans.item_count,
-            "student": st_count,
-            "match": count_ok
-        })
-
-        # Check 2: Total Qty
-        qty_ok = abs(st_qty - ans.total_qty) <= Decimal(str(tolerance))
-        if qty_ok: matched += 1
-        details.append({
-            "field": "Tổng số lượng tồn kho",
-            "answer": float(ans.total_qty),
-            "student": float(st_qty),
-            "match": qty_ok
-        })
-
-        # Check 3: Total Amount
-        amt_ok = abs(st_amt - ans.total_amount) <= Decimal(str(tolerance))
-        if amt_ok: matched += 1
-        details.append({
-            "field": "Tổng giá trị tồn kho (VND)",
-            "answer": float(ans.total_amount),
-            "student": float(st_amt),
-            "match": amt_ok
-        })
-
-        ratio = matched / total_checks
-
+        tol = Decimal(str(tolerance))
+        checks = {
+            "distinct_item_count": student_count == answer.item_count,
+            "total_quantity": abs(student_quantity - answer.total_qty) <= tol,
+            "total_amount": abs(student_amount - answer.total_amount) <= tol,
+        }
+        details = [
+            {
+                "field": "Số mặt hàng phân biệt",
+                "answer": answer.item_count,
+                "student": student_count,
+                "match": checks["distinct_item_count"],
+            },
+            {
+                "field": "Tổng số lượng tồn kho",
+                "answer": float(answer.total_qty),
+                "student": float(student_quantity),
+                "match": checks["total_quantity"],
+            },
+            {
+                "field": "Tổng giá trị tồn kho",
+                "answer": float(answer.total_amount),
+                "student": float(student_amount),
+                "match": checks["total_amount"],
+            },
+        ]
+        matched = sum(1 for value in checks.values() if value)
         return CompareResult(
             module_id=self.module_id,
             display_name=self.display_name,
-            total_items=total_checks,
+            total_items=len(checks),
             matched_items=matched,
-            match_ratio=ratio,
+            match_ratio=matched / len(checks),
             details=details,
-            raw_answer=ans,
-            raw_student={"item_count": st_count, "total_qty": float(st_qty), "total_amount": float(st_amt)}
+            raw_answer=answer,
+            raw_student={
+                "item_count": student_count,
+                "total_qty": float(student_quantity),
+                "total_amount": float(student_amount),
+            },
         )
