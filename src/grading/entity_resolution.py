@@ -30,6 +30,15 @@ class EntityResolution:
     # Chỉ chứa bằng chứng được phép quyết định có nhận diện được hay không.
     anchor_costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
 
+    def identification_status(self, answer_entity_id: str) -> str:
+        if answer_entity_id in self.missing_answer_entities:
+            return "MISSING"
+        if answer_entity_id in self.ambiguous_candidates:
+            return "AMBIGUOUS_MAPPED"
+        if answer_entity_id in self.mapping:
+            return "IDENTIFIED"
+        return "UNRESOLVED"
+
 
 class EntityResolver:
     """Ghép mặt hàng đáp án với mặt hàng sinh viên theo hai tầng.
