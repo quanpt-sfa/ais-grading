@@ -1,30 +1,55 @@
-import openpyxl
+from __future__ import annotations
+
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 import logging
-from pathlib import Path
 
 from src.db.connection import DatabaseConnection
 from src.db.queries import QueryRepository
 from src.answer.models import (
-    MasterAnswerData,
-    InventoryAnswer,
+    AccountBalanceItem,
+    AccountingGraph,
+    FinancialReportAnswer,
     FixedAssetAnswer,
     FixedAssetItem,
     GeneralBalanceAnswer,
-    AccountBalanceItem,
+    InventoryAnswer,
+    MasterAnswerData,
     TransactionAnswer,
     TransactionItem,
-    FinancialReportAnswer,
-    AccountingGraph,
 )
+from src.answer.snapshot import AnswerSnapshot, AnswerSnapshotStore
+from src.answer.validator import AnswerValidator
 from src.grading.accounting_graph import AccountingGraphBuilder
 
 logger = logging.getLogger(__name__)
 
 
 class AnswerLoader:
-    """Load đáp án từ SQL Server hoặc Excel fallback."""
+    """Trích xuất một canonical answer package từ đúng một nguồn database."""
+
+    CANONICAL_QUERY_IDS = (
+        "catalog_inventory_items",
+        "opening_inventory_lines",
+        "fixed_asset_balance",
+        "opening_general_ledger_lines",
+        "purchase_order_lines",
+        "purchase_voucher_lines",
+        "inventory_inward_lines",
+        "inventory_ledger_lines",
+        "general_ledger_lines",
+        "voucher_edges",
+        "financial_reports",
+    )
+
+    DATE_SCOPED_QUERY_IDS = {
+        "purchase_order_lines",
+        "purchase_voucher_lines",
+        "inventory_inward_lines",
+        "inventory_ledger_lines",
+        "general_ledger_lines",
+    }
 
     def __init__(
         self,
@@ -36,304 +61,266 @@ class AnswerLoader:
         self.query_repo = query_repo
         self.config = config
         self.answer_config = config.get("answer", {})
+        self.answer_query_repo = QueryRepository(
+            self.answer_config.get(
+                "query_file", "config/answer_queries.yaml"
+            )
+        )
         self.answer_db = self.answer_config.get("database", "HungBinh2024")
-        self.excel_path = self.answer_config.get("excel_fallback", "d12.xlsm")
-        self.excel_sheet = self.answer_config.get(
-            "excel_sheet_answer", "DapAn"
+        self.source = str(
+            self.answer_config.get("source", "database")
+        ).strip().lower()
+        self.strict = bool(self.answer_config.get("strict", True))
+        self.answer_version = str(
+            self.answer_config.get("version", "unversioned")
+        )
+        self.scope = dict(self.answer_config.get("scope", {}) or {})
+        self.isolation_level = str(
+            self.answer_config.get("transaction_isolation", "SERIALIZABLE")
         )
         self.graph_builder = AccountingGraphBuilder()
+        validator_config = dict(
+            self.answer_config.get("validation", {}) or {}
+        )
+        validator_config.setdefault(
+            "required_queries", list(self.CANONICAL_QUERY_IDS)
+        )
+        self.validator = AnswerValidator(validator_config)
+        self.snapshot_store = AnswerSnapshotStore(
+            self.answer_config.get(
+                "snapshot_directory", "data/answer_snapshots"
+            )
+        )
 
     def load(self) -> MasterAnswerData:
-        """Load đáp án tổng hợp và đồ thị nghiệp vụ cấp dòng."""
-        logger.info("Đang load đáp án từ database [%s]...", self.answer_db)
-        master = MasterAnswerData()
-
-        try:
-            db_inv = self.query_repo.execute(
-                self.db_conn, self.answer_db, "inventory_balance"
+        if self.source != "database":
+            raise RuntimeError(
+                "Single-ground-truth mode requires answer.source=database. "
+                "Excel may be imported into a database beforehand, but it is "
+                "not allowed as an automatic fallback during grading."
             )
-            if db_inv and db_inv[0]["item_count"] > 0:
-                master.inventory = InventoryAnswer(
-                    item_count=int(db_inv[0]["item_count"]),
-                    total_qty=Decimal(str(db_inv[0]["total_qty"])),
-                    total_amount=Decimal(str(db_inv[0]["total_amount"])),
-                )
-
-            db_fa = self.query_repo.execute(
-                self.db_conn, self.answer_db, "fixed_asset_balance"
-            )
-            if db_fa:
-                fa_items = []
-                for row in db_fa:
-                    fa_items.append(
-                        FixedAssetItem(
-                            code=str(row.get("FixedAssetCode", "")),
-                            name=str(row.get("FixedAssetName", "")),
-                            org_price=Decimal(str(row.get("OrgPrice", 0))),
-                            depreciation_amount=Decimal(
-                                str(row.get("DepreciationAmount", 0))
-                            ),
-                            accum_depreciation_amount=Decimal(
-                                str(row.get("AccumDepreciationAmount", 0))
-                            ),
-                            lifetime_months=int(
-                                row.get("LifeTimeInMonth", 0) or 0
-                            ),
-                            remaining_months=int(
-                                row.get("LifeTimeRemainingInMonth", 0) or 0
-                            ),
-                        )
-                    )
-                master.fixed_asset = FixedAssetAnswer(items=fa_items)
-
-            db_gb = self.query_repo.execute(
-                self.db_conn, self.answer_db, "general_balance"
-            )
-            if db_gb:
-                gb_accounts = {}
-                for row in db_gb:
-                    code = str(row["AccountCode"])
-                    gb_accounts[code] = AccountBalanceItem(
-                        account_code=code,
-                        debit_amount=Decimal(
-                            str(row.get("DebitAmount", 0))
-                        ),
-                        debit_amount_oc=Decimal(
-                            str(row.get("DebitAmountOC", 0))
-                        ),
-                        credit_amount=Decimal(
-                            str(row.get("CreditAmount", 0))
-                        ),
-                        credit_amount_oc=Decimal(
-                            str(row.get("CreditAmountOC", 0))
-                        ),
-                        quantity=Decimal(str(row.get("Quantity", 0))),
-                    )
-                master.general_balance = GeneralBalanceAnswer(
-                    accounts=gb_accounts
-                )
-
-            db_tx = self.query_repo.execute(
-                self.db_conn, self.answer_db, "transactions"
-            )
-            if db_tx:
-                tx_entries = {}
-                for row in db_tx:
-                    task_id = int(row["TaskID"])
-                    code = str(row["AccountCode"])
-                    tx_entries[(task_id, code)] = TransactionItem(
-                        task_id=task_id,
-                        account_code=code,
-                        amount=Decimal(str(row.get("Amount", 0))),
-                        amount_oc=Decimal(str(row.get("AmountOC", 0))),
-                        quantity=Decimal(str(row.get("Quantity", 0))),
-                    )
-                master.transactions = TransactionAnswer(entries=tx_entries)
-
-            db_fr = self.query_repo.execute(
-                self.db_conn, self.answer_db, "financial_reports"
-            )
-            if db_fr:
-                fr_items = {}
-                for row in db_fr:
-                    report_type = str(row["ReportType"])
-                    code = str(row["ItemCode"])
-                    fr_items[(report_type, code)] = Decimal(
-                        str(row.get("Amount", 0))
-                    )
-                master.financial_reports = FinancialReportAnswer(
-                    items=fr_items
-                )
-        except Exception as exc:
-            logger.warning(
-                "Không thể load đầy đủ đáp án tổng hợp từ DB [%s]: %s",
-                self.answer_db,
-                exc,
+        if not self.db_conn.database_exists(self.answer_db):
+            raise RuntimeError(
+                f"Answer database is unavailable: {self.answer_db}"
             )
 
-        # Đồ thị cấp dòng được load độc lập để một query tổng hợp lỗi không làm
-        # mất toàn bộ dữ liệu workflow.
-        master.accounting_graph = self._load_accounting_graph()
+        queries = {
+            query_id: self.answer_query_repo.get_query(query_id)
+            for query_id in self.CANONICAL_QUERY_IDS
+        }
+        batch = {
+            query_id: (query, ())
+            for query_id, query in queries.items()
+        }
+        logger.info(
+            "Trích xuất canonical answer [%s] trong một transaction %s...",
+            self.answer_db,
+            self.isolation_level,
+        )
+        raw = self.db_conn.execute_query_batch(
+            self.answer_db,
+            batch,
+            isolation_level=self.isolation_level,
+        )
+        scoped_raw, scope_metrics = self._apply_scope(raw)
+        graph = self.graph_builder.build(scoped_raw)
+        validation = self.validator.assert_valid(
+            scoped_raw,
+            graph,
+            self.scope,
+        )
+        validation.metrics["scope_excluded_rows"] = scope_metrics
 
-        if Path(self.excel_path).exists():
-            logger.info(
-                "Bổ sung đáp án từ file Excel: %s (sheet '%s')",
-                self.excel_path,
-                self.excel_sheet,
-            )
-            self._fill_from_excel(master)
+        master = self._build_master(scoped_raw, graph)
+        snapshot = AnswerSnapshot.create(
+            answer_version=self.answer_version,
+            source_database=self.answer_db,
+            scope=self.scope,
+            queries=queries,
+            config=self.answer_config,
+            validation_report=validation.to_dict(),
+            raw_data=scoped_raw,
+        )
+        snapshot_path = self.snapshot_store.save(snapshot)
+        master.answer_snapshot_id = snapshot.snapshot_id
+        master.answer_version = snapshot.answer_version
+        master.answer_data_hash = snapshot.data_hash
+        master.answer_snapshot_path = str(snapshot_path)
+        master.validation_report = validation.to_dict()
+        master.raw_data = scoped_raw
 
-        try:
-            from src.db.sqlite_storage import SQLiteStorage
-
-            storage = SQLiteStorage()
-            if master.transactions or master.inventory:
-                storage.save_master_answer(master, self.answer_db)
-        except Exception as exc:
-            logger.debug(
-                "Không thể lưu master answer cache vào SQLite: %s", exc
-            )
-
+        logger.info(
+            "Đã khóa answer snapshot %s (%s)",
+            snapshot.snapshot_id,
+            snapshot_path,
+        )
         return master
 
-    def _load_accounting_graph(self) -> Optional[AccountingGraph]:
-        raw: Dict[str, Any] = {}
-        successful_queries = 0
-        for query_id in AccountingGraphBuilder.QUERY_IDS:
-            try:
-                raw[query_id] = self.query_repo.execute(
-                    self.db_conn, self.answer_db, query_id
-                )
-                successful_queries += 1
-            except Exception as exc:
-                logger.warning(
-                    "Không load được query workflow [%s] từ đáp án [%s]: %s",
-                    query_id,
-                    self.answer_db,
-                    exc,
-                )
-                raw[query_id] = []
+    def _apply_scope(
+        self,
+        raw: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> Tuple[Dict[str, list], Dict[str, int]]:
+        start = self._date(self.scope.get("start"))
+        end = self._date(self.scope.get("end"))
+        branch_id = self.scope.get("branch_id")
+        filtered: Dict[str, list] = {}
+        excluded: Dict[str, int] = {}
 
-        if successful_queries == 0:
-            return None
-        graph = self.graph_builder.build(raw)
-        if not (
-            graph.entities
-            or graph.opening_balances
-            or graph.events
-            or graph.inventory_ledger
-            or graph.general_ledger
-        ):
-            return None
-        return graph
+        for query_id, rows in raw.items():
+            output = []
+            excluded_count = 0
+            for row in rows:
+                if branch_id and row.get("BranchID") not in (None, branch_id):
+                    excluded_count += 1
+                    continue
+                if query_id in self.DATE_SCOPED_QUERY_IDS:
+                    ref_date = self._date(
+                        row.get("RefDate") or row.get("PostedDate")
+                    )
+                    if start and ref_date and ref_date < start:
+                        excluded_count += 1
+                        continue
+                    if end and ref_date and ref_date > end:
+                        excluded_count += 1
+                        continue
+                output.append(dict(row))
+            filtered[query_id] = output
+            excluded[query_id] = excluded_count
+        return filtered, excluded
 
-    def _fill_from_excel(self, master: MasterAnswerData):
-        """Đọc sheet DapAn nếu DB thiếu dữ liệu tổng hợp cũ."""
-        wb = openpyxl.load_workbook(
-            self.excel_path, read_only=True, data_only=True
+    def _build_master(
+        self,
+        raw: Mapping[str, Sequence[Mapping[str, Any]]],
+        graph: AccountingGraph,
+    ) -> MasterAnswerData:
+        master = MasterAnswerData(accounting_graph=graph)
+        master.inventory = self._derive_inventory(graph)
+        master.fixed_asset = self._derive_fixed_assets(
+            raw.get("fixed_asset_balance", ())
         )
-        if self.excel_sheet not in wb.sheetnames:
-            wb.close()
-            return
+        master.general_balance = self._derive_general_balance(
+            raw.get("opening_general_ledger_lines", ())
+        )
+        master.transactions = self._derive_transactions(graph)
+        master.financial_reports = self._derive_financial_reports(
+            raw.get("financial_reports", ())
+        )
+        return master
 
-        ws = wb[self.excel_sheet]
+    @staticmethod
+    def _derive_inventory(graph: AccountingGraph) -> InventoryAnswer:
+        entity_ids = {
+            row.entity_id for row in graph.opening_balances if row.entity_id
+        }
+        return InventoryAnswer(
+            item_count=len(entity_ids),
+            total_qty=sum(
+                (row.quantity for row in graph.opening_balances),
+                Decimal("0"),
+            ),
+            total_amount=sum(
+                (row.amount for row in graph.opening_balances),
+                Decimal("0"),
+            ),
+        )
 
-        if not master.inventory or master.inventory.item_count == 0:
-            a8 = ws["A8"].value
-            b8 = ws["B8"].value
-            c8 = ws["C8"].value
-            if a8 is not None and b8 is not None and c8 is not None:
-                master.inventory = InventoryAnswer(
-                    item_count=int(a8),
-                    total_qty=Decimal(str(b8)),
-                    total_amount=Decimal(str(c8)),
+    @staticmethod
+    def _derive_fixed_assets(
+        rows: Iterable[Mapping[str, Any]],
+    ) -> FixedAssetAnswer:
+        items = []
+        for row in rows:
+            items.append(
+                FixedAssetItem(
+                    code=str(row.get("FixedAssetCode") or ""),
+                    name=str(row.get("FixedAssetName") or ""),
+                    org_price=Decimal(str(row.get("OrgPrice") or 0)),
+                    depreciation_amount=Decimal(
+                        str(row.get("DepreciationAmount") or 0)
+                    ),
+                    accum_depreciation_amount=Decimal(
+                        str(row.get("AccumDepreciationAmount") or 0)
+                    ),
+                    lifetime_months=int(row.get("LifeTimeInMonth") or 0),
+                    remaining_months=int(
+                        row.get("LifeTimeRemainingInMonth") or 0
+                    ),
                 )
+            )
+        return FixedAssetAnswer(items=items)
 
-        if not master.fixed_asset or not master.fixed_asset.items:
-            fa_items = []
-            for row_number in range(8, 15):
-                original_price = ws[f"D{row_number}"].value
-                if original_price is not None and isinstance(
-                    original_price, (int, float)
-                ):
-                    fa_items.append(
-                        FixedAssetItem(
-                            code=f"TS00{row_number - 7}",
-                            name=f"Tài sản cố định {row_number - 7}",
-                            org_price=Decimal(str(original_price)),
-                            depreciation_amount=Decimal(
-                                str(ws[f"E{row_number}"].value or 0)
-                            ),
-                            accum_depreciation_amount=Decimal(
-                                str(ws[f"F{row_number}"].value or 0)
-                            ),
-                            lifetime_months=int(
-                                ws[f"G{row_number}"].value or 0
-                            ),
-                            remaining_months=int(
-                                ws[f"H{row_number}"].value or 0
-                            ),
-                        )
-                    )
-            if fa_items:
-                master.fixed_asset = FixedAssetAnswer(items=fa_items)
+    @staticmethod
+    def _derive_general_balance(
+        rows: Iterable[Mapping[str, Any]],
+    ) -> GeneralBalanceAnswer:
+        accounts: Dict[str, AccountBalanceItem] = {}
+        for row in rows:
+            number = str(row.get("AccountNumber") or "").strip()
+            if not number:
+                continue
+            code = number[:3]
+            item = accounts.setdefault(
+                code,
+                AccountBalanceItem(account_code=code),
+            )
+            item.debit_amount += Decimal(str(row.get("DebitAmount") or 0))
+            item.debit_amount_oc += Decimal(
+                str(row.get("DebitAmountOC") or 0)
+            )
+            item.credit_amount += Decimal(str(row.get("CreditAmount") or 0))
+            item.credit_amount_oc += Decimal(
+                str(row.get("CreditAmountOC") or 0)
+            )
+            item.quantity += Decimal(str(row.get("MainQuantity") or 0))
+        return GeneralBalanceAnswer(accounts=accounts)
 
-        if not master.general_balance or not master.general_balance.accounts:
-            gb_accounts = {}
-            for row_number in range(8, 30):
-                account = ws[f"I{row_number}"].value
-                if account:
-                    code = str(account).strip()
-                    gb_accounts[code] = AccountBalanceItem(
-                        account_code=code,
-                        debit_amount=Decimal(
-                            str(ws[f"J{row_number}"].value or 0)
-                        ),
-                        debit_amount_oc=Decimal(
-                            str(ws[f"K{row_number}"].value or 0)
-                        ),
-                        credit_amount=Decimal(
-                            str(ws[f"L{row_number}"].value or 0)
-                        ),
-                        credit_amount_oc=Decimal(
-                            str(ws[f"M{row_number}"].value or 0)
-                        ),
-                        quantity=Decimal(
-                            str(ws[f"N{row_number}"].value or 0)
-                        ),
-                    )
-            if gb_accounts:
-                master.general_balance = GeneralBalanceAnswer(
-                    accounts=gb_accounts
-                )
+    @staticmethod
+    def _derive_transactions(graph: AccountingGraph) -> TransactionAnswer:
+        entries: Dict[Tuple[int, str], TransactionItem] = {}
+        for row in graph.general_ledger:
+            account = str(row.debit_account or "").strip()
+            ref_date = AnswerLoader._date(row.ref_date)
+            if not account or ref_date is None:
+                continue
+            task_id = ref_date.day + ref_date.month * 100
+            code = account[:3]
+            key = (task_id, code)
+            item = entries.setdefault(
+                key,
+                TransactionItem(task_id=task_id, account_code=code),
+            )
+            item.amount += row.amount
+            if account.startswith("15") or account.startswith("511"):
+                item.quantity += row.quantity
+        entries = {
+            key: value
+            for key, value in entries.items()
+            if value.amount != 0 or value.quantity != 0
+        }
+        return TransactionAnswer(entries=entries)
 
-        if not master.transactions or not master.transactions.entries:
-            tx_entries = {}
-            for row_number in range(8, 45):
-                task = ws[f"O{row_number}"].value
-                account = ws[f"P{row_number}"].value
-                if task is not None and account is not None:
-                    try:
-                        task_id = int(task)
-                        code = str(account).strip()
-                        tx_entries[(task_id, code)] = TransactionItem(
-                            task_id=task_id,
-                            account_code=code,
-                            amount=Decimal(
-                                str(ws[f"Q{row_number}"].value or 0)
-                            ),
-                            amount_oc=Decimal(
-                                str(ws[f"R{row_number}"].value or 0)
-                            ),
-                            quantity=Decimal(
-                                str(ws[f"S{row_number}"].value or 0)
-                            ),
-                        )
-                    except (ValueError, TypeError):
-                        pass
-            if tx_entries:
-                master.transactions = TransactionAnswer(entries=tx_entries)
+    @staticmethod
+    def _derive_financial_reports(
+        rows: Iterable[Mapping[str, Any]],
+    ) -> FinancialReportAnswer:
+        items: Dict[Tuple[str, str], Decimal] = {}
+        for row in rows:
+            key = (
+                str(row.get("ReportType") or "").strip(),
+                str(row.get("ItemCode") or "").strip(),
+            )
+            items[key] = Decimal(str(row.get("Amount") or 0))
+        return FinancialReportAnswer(items=items)
 
-        if (
-            not master.financial_reports
-            or not master.financial_reports.items
-        ):
-            fr_items = {}
-            for row_number in range(8, 40):
-                report_type = ws[f"T{row_number}"].value
-                item_code = ws[f"U{row_number}"].value
-                amount = ws[f"V{row_number}"].value
-                if (
-                    report_type is not None
-                    and item_code is not None
-                    and amount is not None
-                ):
-                    fr_items[
-                        (str(report_type).strip(), str(item_code).strip())
-                    ] = Decimal(str(amount))
-            if fr_items:
-                master.financial_reports = FinancialReportAnswer(
-                    items=fr_items
-                )
-
-        wb.close()
+    @staticmethod
+    def _date(value: Any) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.fromisoformat(str(value)[:10]).date()
+        except ValueError:
+            return None
