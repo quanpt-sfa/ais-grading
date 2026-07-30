@@ -82,7 +82,27 @@ def test_partial_answer_query_set_is_rejected():
         )
 
 
-def test_duplicate_report_key_is_rejected():
+def report_row(detail_id, amount):
+    return {
+        "ReportDetailID": detail_id,
+        "RefID": "report-1",
+        "ReportType": "1",
+        "ItemCode": "A",
+        "ItemIndex": 1,
+        "SortOrder": 1,
+        "Category": 0,
+        "FormulaType": 0,
+        "Amount": amount,
+        "ReportRefType": 100,
+        "DisplayOnBook": 0,
+        "Period": 12,
+        "Year": 2024,
+        "FromDate": "2024-01-01",
+        "ToDate": "2024-12-31",
+    }
+
+
+def test_duplicate_report_type_item_code_is_allowed_and_counted():
     validator = AnswerValidator(
         {
             "required_queries": ["financial_reports"],
@@ -91,8 +111,34 @@ def test_duplicate_report_key_is_rejected():
     )
     raw = {
         "financial_reports": [
-            {"ReportType": 1, "ItemCode": "A", "Amount": 10},
-            {"ReportType": 1, "ItemCode": "A", "Amount": 20},
+            report_row("detail-1", 10),
+            report_row("detail-2", 20),
+        ]
+    }
+
+    report = validator.assert_valid(
+        raw,
+        valid_graph(),
+        {"start": "2024-01-01", "end": "2024-12-31"},
+    )
+
+    assert report.is_valid
+    assert report.metrics["financial_report_line_count"] == 2
+    assert report.metrics["financial_report_instance_count"] == 1
+    assert report.metrics["non_unique_report_type_item_code_groups"] == 1
+
+
+def test_duplicate_report_detail_id_is_rejected():
+    validator = AnswerValidator(
+        {
+            "required_queries": ["financial_reports"],
+            "required_workflow_roles": ["PU_ORDER", "PU_VOUCHER"],
+        }
+    )
+    raw = {
+        "financial_reports": [
+            report_row("detail-1", 10),
+            report_row("detail-1", 20),
         ]
     }
 
