@@ -6,8 +6,8 @@ from typing import Dict, List, Tuple, Any, Optional
 @dataclass
 class InventoryAnswer:
     item_count: int = 0
-    total_qty: Decimal = Decimal('0')
-    total_amount: Decimal = Decimal('0')
+    total_qty: Decimal = Decimal("0")
+    total_amount: Decimal = Decimal("0")
 
 
 @dataclass
@@ -29,11 +29,11 @@ class FixedAssetAnswer:
 @dataclass
 class AccountBalanceItem:
     account_code: str
-    debit_amount: Decimal = Decimal('0')
-    debit_amount_oc: Decimal = Decimal('0')
-    credit_amount: Decimal = Decimal('0')
-    credit_amount_oc: Decimal = Decimal('0')
-    quantity: Decimal = Decimal('0')
+    debit_amount: Decimal = Decimal("0")
+    debit_amount_oc: Decimal = Decimal("0")
+    credit_amount: Decimal = Decimal("0")
+    credit_amount_oc: Decimal = Decimal("0")
+    quantity: Decimal = Decimal("0")
 
 
 @dataclass
@@ -45,9 +45,9 @@ class GeneralBalanceAnswer:
 class TransactionItem:
     task_id: int
     account_code: str
-    amount: Decimal = Decimal('0')
-    amount_oc: Decimal = Decimal('0')
-    quantity: Decimal = Decimal('0')
+    amount: Decimal = Decimal("0")
+    amount_oc: Decimal = Decimal("0")
+    quantity: Decimal = Decimal("0")
 
 
 @dataclass
@@ -76,7 +76,7 @@ class InventoryEntity:
     inventory_account: Optional[str] = None
     cogs_account: Optional[str] = None
     sale_account: Optional[str] = None
-    tax_rate: Decimal = Decimal('0')
+    tax_rate: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -145,4 +145,9 @@ class MasterAnswerData:
     transactions: Optional[TransactionAnswer] = None
     financial_reports: Optional[FinancialReportAnswer] = None
     accounting_graph: Optional[AccountingGraph] = None
+    answer_snapshot_id: Optional[str] = None
+    answer_version: Optional[str] = None
+    answer_data_hash: Optional[str] = None
+    answer_snapshot_path: Optional[str] = None
+    validation_report: Dict[str, Any] = field(default_factory=dict)
     raw_data: Dict[str, Any] = field(default_factory=dict)
