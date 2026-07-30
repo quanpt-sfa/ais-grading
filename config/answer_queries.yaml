@@ -1,0 +1,262 @@
+# Canonical answer extraction queries.
+# Mọi query trong file này được chạy trong cùng một SQL Server transaction.
+
+catalog_inventory_items:
+  query: >
+    SELECT
+      ii.InventoryItemID,
+      ii.InventoryItemType,
+      ii.UnitID,
+      u.UnitName,
+      ii.DefaultStockID,
+      ii.InventoryAccount,
+      ii.COGSAccount,
+      ii.SaleAccount,
+      ii.TaxRate,
+      ii.CostMethod,
+      ii.Inactive,
+      ii.InventoryItemCode,
+      ii.InventoryItemName
+    FROM InventoryItem ii
+    LEFT JOIN Unit u ON u.UnitID = ii.UnitID
+
+opening_inventory_lines:
+  query: >
+    SELECT
+      InventoryItemID,
+      StockID,
+      COALESCE(MainUnitID, UnitID) AS CanonicalUnitID,
+      ISNULL(SUM(CASE
+        WHEN MainInwardQuantity <> 0 THEN MainInwardQuantity
+        ELSE InwardQuantityBalance END), 0) AS OpeningQuantity,
+      ISNULL(SUM(InwardAmountBalance), 0) AS OpeningAmount,
+      CASE
+        WHEN SUM(CASE
+          WHEN MainInwardQuantity <> 0 THEN MainInwardQuantity
+          ELSE InwardQuantityBalance END) <> 0
+        THEN SUM(InwardAmountBalance) /
+             SUM(CASE
+               WHEN MainInwardQuantity <> 0 THEN MainInwardQuantity
+               ELSE InwardQuantityBalance END)
+        ELSE 0
+      END AS OpeningUnitPrice
+    FROM InventoryLedger
+    WHERE UPPER(ISNULL(RefNo, '')) = 'OPN'
+    GROUP BY InventoryItemID, StockID, COALESCE(MainUnitID, UnitID)
+
+fixed_asset_balance:
+  query: >
+    SELECT
+      FixedAssetCode,
+      FixedAssetName,
+      OrgPrice,
+      DepreciationAmount,
+      AccumDepreciationAmount,
+      LifeTimeInMonth,
+      LifeTimeRemainingInMonth
+    FROM FixedAsset
+    WHERE UPPER(ISNULL(RefNo, '')) = 'OPN'
+    ORDER BY FixedAssetCode
+
+opening_general_ledger_lines:
+  query: >
+    SELECT
+      GeneralLedgerID,
+      RefID,
+      RefDetailID,
+      RefType,
+      RefDate,
+      PostedDate,
+      AccountNumber,
+      DebitAmount,
+      DebitAmountOC,
+      CreditAmount,
+      CreditAmountOC,
+      MainQuantity
+    FROM GeneralLedger
+    WHERE CorrespondingAccountNumber IS NULL
+
+purchase_order_lines:
+  query: >
+    SELECT
+      'PU_ORDER' AS ModuleRole,
+      h.RefType,
+      h.RefID,
+      d.RefDetailID,
+      h.RefDate,
+      CAST(NULL AS datetime) AS PostedDate,
+      h.AccountObjectID,
+      d.InventoryItemID,
+      d.StockID,
+      d.UnitID,
+      d.MainUnitID,
+      d.Quantity,
+      d.MainQuantity,
+      d.UnitPrice,
+      d.MainUnitPrice,
+      d.Amount,
+      d.VATRate,
+      d.VATAmount,
+      CAST(NULL AS nvarchar(20)) AS DebitAccount,
+      CAST(NULL AS nvarchar(20)) AS CreditAccount,
+      CAST(NULL AS uniqueidentifier) AS SourceRefID,
+      CAST(NULL AS uniqueidentifier) AS SourceRefDetailID,
+      CAST(NULL AS bit) AS IsPostedFinance,
+      CAST(NULL AS bit) AS IsPostedInventory,
+      d.QuantityReceipt,
+      d.SortOrder
+    FROM PUOrder h
+    INNER JOIN PUOrderDetail d ON d.RefID = h.RefID
+
+purchase_voucher_lines:
+  query: >
+    SELECT
+      'PU_VOUCHER' AS ModuleRole,
+      h.RefType,
+      h.RefID,
+      d.RefDetailID,
+      h.RefDate,
+      h.PostedDate,
+      h.AccountObjectID,
+      d.InventoryItemID,
+      d.StockID,
+      d.UnitID,
+      d.MainUnitID,
+      d.Quantity,
+      d.MainQuantity,
+      d.UnitPrice,
+      d.MainUnitPrice,
+      d.Amount,
+      d.InwardAmount,
+      d.VATRate,
+      d.VATAmount,
+      d.DebitAccount,
+      d.CreditAccount,
+      d.PUOrderRefID AS SourceRefID,
+      d.PUOrderRefDetailID AS SourceRefDetailID,
+      CASE
+        WHEN h.IsPostedFinance = 1 OR h.IsPostedManagement = 1
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit)
+      END AS IsPostedFinance,
+      CASE
+        WHEN h.IsPostedInventoryBookFinance = 1
+          OR h.IsPostedInventoryBookManagement = 1
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit)
+      END AS IsPostedInventory
+    FROM PUVoucher h
+    INNER JOIN PUVoucherDetail d ON d.RefID = h.RefID
+
+inventory_inward_lines:
+  query: >
+    SELECT
+      'IN_INWARD' AS ModuleRole,
+      h.RefType,
+      h.RefID,
+      d.RefDetailID,
+      h.RefDate,
+      h.PostedDate,
+      h.AccountObjectID,
+      d.InventoryItemID,
+      d.StockID,
+      d.UnitID,
+      d.MainUnitID,
+      d.Quantity,
+      d.MainQuantity,
+      d.UnitPriceFinance,
+      d.MainUnitPriceFinance,
+      d.AmountFinance,
+      d.DebitAccount,
+      d.CreditAccount,
+      d.ConfrontingRefID AS SourceRefID,
+      d.ConfrontingRefDetailID AS SourceRefDetailID,
+      CASE
+        WHEN h.IsPostedFinance = 1 OR h.IsPostedManagement = 1
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit)
+      END AS IsPostedFinance,
+      CASE
+        WHEN h.IsPostedInventoryBookFinance = 1
+          OR h.IsPostedInventoryBookManagement = 1
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit)
+      END AS IsPostedInventory
+    FROM INInward h
+    INNER JOIN INInwardDetail d ON d.RefID = h.RefID
+
+inventory_ledger_lines:
+  query: >
+    SELECT
+      InventoryLedgerID,
+      RefID,
+      RefDetailID,
+      RefType,
+      RefDate,
+      PostedDate,
+      InventoryItemID,
+      StockID,
+      UnitID,
+      MainUnitID,
+      UnitPrice,
+      MainUnitPrice,
+      InwardQuantity,
+      OutwardQuantity,
+      MainInwardQuantity,
+      MainOutwardQuantity,
+      InwardAmount,
+      OutwardAmount,
+      AccountNumber,
+      CorrespondingAccountNumber,
+      AccountObjectID,
+      ConfrontingRefID,
+      ConfrontingRefDetailID,
+      OutwardRefID,
+      OutwardRefDetailID,
+      IsInward
+    FROM InventoryLedger
+    WHERE UPPER(ISNULL(RefNo, '')) <> 'OPN'
+
+general_ledger_lines:
+  query: >
+    SELECT
+      GeneralLedgerID,
+      RefID,
+      RefDetailID,
+      RefType,
+      RefDate,
+      PostedDate,
+      InventoryItemID,
+      AccountObjectID,
+      StockID,
+      AccountNumber,
+      CorrespondingAccountNumber,
+      DebitAmount,
+      CreditAmount,
+      Quantity,
+      UnitPrice,
+      MainQuantity,
+      MainUnitPrice,
+      MainUnitID,
+      UnitID,
+      PUOrderRefID,
+      IsPostToManagementBook
+    FROM GeneralLedger
+    WHERE UPPER(ISNULL(RefNo, '')) <> 'OPN'
+
+voucher_edges:
+  query: >
+    SELECT
+      RefID1,
+      RefID2,
+      RefType1,
+      RefType2,
+      ReferenceType,
+      SortOrder
+    FROM VoucherReference
+
+financial_reports:
+  query: >
+    SELECT
+      ReportType,
+      ItemCode,
+      ISNULL(Amount, 0) AS Amount
+    FROM FRReportDetail
+    WHERE ReportType IN (1, 2) AND FormulaType = 0
+    ORDER BY ReportType, ItemCode
