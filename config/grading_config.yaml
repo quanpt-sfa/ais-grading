@@ -16,6 +16,11 @@ scoring:
     transactions: 55.0
     financial_reports: 5.0
     audit_analysis: 0.0
+entity_matching:
+  # Mã, tên và GUID không được dùng làm khóa giữa hai database.
+  max_cost: 80.0
+  ambiguity_margin: 0.5
+  max_exact_assignment_size: 18
 student:
   source: excel
   excel_file: d12.xlsm
