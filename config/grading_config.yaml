@@ -23,6 +23,20 @@ answer:
       - PU_ORDER
       - PU_VOUCHER
 
+# .bak và .mbk đều được xử lý như SQL Server database backup.
+# Nếu SQL Server ở máy khác, staging_directory phải là UNC path mà cả tiến
+# trình web và tài khoản dịch vụ SQL Server đều có quyền đọc.
+answer_restore:
+  enabled: true
+  staging_directory: data/answer_backups
+  source_directory: data/answer_sources
+  max_upload_bytes: 21474836480
+  keep_backup: true
+  set_read_only: true
+  # Để null sẽ tự đọc InstanceDefaultDataPath/InstanceDefaultLogPath.
+  data_directory: null
+  log_directory: null
+
 scoring:
   scale: 10.0
   tolerance: 1.0
