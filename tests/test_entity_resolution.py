@@ -78,6 +78,10 @@ def test_same_opening_balance_is_disambiguated_by_workflow_vector():
 
     assert result.mapping["answer-A"] == "student-Y"
     assert result.mapping["answer-B"] == "student-X"
+    assert set(result.ambiguous_candidates["answer-A"]) == {
+        "student-X",
+        "student-Y",
+    }
 
 
 def test_code_and_name_do_not_control_matching():
@@ -94,3 +98,30 @@ def test_code_and_name_do_not_control_matching():
     result = EntityResolver().resolve(answer, student)
 
     assert result.mapping == {"answer-A": "student-ZZZ"}
+
+
+def test_correct_opening_still_maps_when_later_workflow_is_wrong():
+    answer = graph("answer", {"A": 5})
+    student = graph("student", {"X": 999})
+    student.events.append(
+        event(
+            "IN_INWARD",
+            "student-X",
+            777,
+            900000,
+            "student-X-extra-inward",
+        )
+    )
+
+    result = EntityResolver(
+        {
+            "max_anchor_cost": 35.0,
+            "event_tiebreak_weight": 1.0,
+            "event_tiebreak_cap": 25.0,
+        }
+    ).resolve(answer, student)
+
+    assert result.mapping == {"answer-A": "student-X"}
+    assert result.missing_answer_entities == []
+    assert result.anchor_costs[("answer-A", "student-X")] == 0.0
+    assert result.costs[("answer-A", "student-X")] > 0.0
