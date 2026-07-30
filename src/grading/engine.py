@@ -25,6 +25,7 @@ class StudentGradeReport:
     score_data: Dict[str, Any]
     traceability_data: Dict[str, Any]
     module_results: Dict[str, CompareResult]
+    answer_snapshot_id: Optional[str] = None
 
 
 class GradingEngine:
@@ -60,37 +61,42 @@ class GradingEngine:
         self.master_answer: Optional[MasterAnswerData] = None
 
     def initialize(self):
-        """Load đáp án trước khi thực hiện chấm."""
-        logger.info("Khởi tạo GradingEngine và load đáp án master...")
+        """Load và khóa một answer snapshot trước khi chấm."""
+        logger.info("Khởi tạo GradingEngine và khóa answer snapshot...")
         self.master_answer = self.answer_loader.load()
+        if not self.master_answer.answer_snapshot_id:
+            raise RuntimeError(
+                "AnswerLoader returned no immutable answer_snapshot_id"
+            )
+        if not self.master_answer.accounting_graph:
+            raise RuntimeError(
+                "Canonical answer snapshot contains no AccountingGraph"
+            )
 
     def grade_student(self, student: StudentInfo) -> StudentGradeReport:
-        """Chấm điểm bài làm của một sinh viên."""
         if not self.master_answer:
             self.initialize()
         assert self.master_answer is not None
 
         logger.info(
-            "Đang chấm điểm sinh viên: %s (%s %s)...",
+            "Đang chấm điểm sinh viên: %s (%s %s) với snapshot %s...",
             student.student_id,
             student.last_name,
             student.first_name,
+            self.master_answer.answer_snapshot_id,
         )
 
         student_data = self.extractor.extract_all_data(student)
-        resolution: Optional[EntityResolution] = None
-
-        if self.master_answer.accounting_graph is not None:
-            student_graph = self.graph_builder.build(student_data)
-            resolution = self.entity_resolver.resolve(
-                self.master_answer.accounting_graph,
-                student_graph,
-            )
-            student_data["_grading_context"] = GradingContext(
-                master_graph=self.master_answer.accounting_graph,
-                student_graph=student_graph,
-                entity_resolution=resolution,
-            )
+        student_graph = self.graph_builder.build(student_data)
+        resolution: EntityResolution = self.entity_resolver.resolve(
+            self.master_answer.accounting_graph,
+            student_graph,
+        )
+        student_data["_grading_context"] = GradingContext(
+            master_graph=self.master_answer.accounting_graph,
+            student_graph=student_graph,
+            entity_resolution=resolution,
+        )
 
         module_results = {}
         for comparator in self.active_modules:
@@ -125,29 +131,32 @@ class GradingEngine:
                 student.db_name
             )
 
-        if resolution is not None:
-            trace_data["entity_resolution"] = {
-                "mapped_count": len(resolution.mapping),
-                "missing_answer_entities": resolution.missing_answer_entities,
-                "extra_student_entities": resolution.extra_student_entities,
-                "ambiguous_candidates": resolution.ambiguous_candidates,
-                "mapping": resolution.mapping,
-            }
+        trace_data["answer_snapshot"] = {
+            "snapshot_id": self.master_answer.answer_snapshot_id,
+            "answer_version": self.master_answer.answer_version,
+            "data_hash": self.master_answer.answer_data_hash,
+            "snapshot_path": self.master_answer.answer_snapshot_path,
+            "validation": self.master_answer.validation_report,
+        }
+        trace_data["entity_resolution"] = {
+            "mapped_count": len(resolution.mapping),
+            "missing_answer_entities": resolution.missing_answer_entities,
+            "extra_student_entities": resolution.extra_student_entities,
+            "ambiguous_candidates": resolution.ambiguous_candidates,
+            "mapping": resolution.mapping,
+        }
 
         return StudentGradeReport(
             student=student,
             score_data=score_data,
             traceability_data=trace_data,
             module_results=module_results,
+            answer_snapshot_id=self.master_answer.answer_snapshot_id,
         )
 
     def grade_all_students(
         self,
         students: List[StudentInfo],
     ) -> List[StudentGradeReport]:
-        """Chấm điểm danh sách tất cả sinh viên."""
         self.initialize()
-        reports = []
-        for student in students:
-            reports.append(self.grade_student(student))
-        return reports
+        return [self.grade_student(student) for student in students]
