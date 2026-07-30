@@ -254,9 +254,39 @@ voucher_edges:
 financial_reports:
   query: >
     SELECT
-      ReportType,
-      ItemCode,
-      ISNULL(Amount, 0) AS Amount
-    FROM FRReportDetail
-    WHERE ReportType IN (1, 2) AND FormulaType = 0
-    ORDER BY ReportType, ItemCode
+      d.ReportDetailID,
+      d.RefID,
+      d.ReportType,
+      d.ItemID,
+      d.ItemCode,
+      d.ItemName,
+      d.ItemIndex,
+      d.FormulaType,
+      ISNULL(d.Amount, 0) AS Amount,
+      ISNULL(d.PrevAmount, 0) AS PrevAmount,
+      d.SortOrder,
+      d.Category,
+      ISNULL(d.OtherAmount, 0) AS OtherAmount,
+      ISNULL(d.OtherPrevAmount, 0) AS OtherPrevAmount,
+      r.RefType AS ReportRefType,
+      r.DisplayOnBook,
+      r.BranchID,
+      r.Period,
+      r.Year,
+      r.PeriodName,
+      r.ReportName,
+      r.FromDate,
+      r.ToDate,
+      r.CurrencyID,
+      r.IsReportFinanceAudit
+    FROM FRReportDetail d
+    INNER JOIN FRReportList r ON r.RefID = d.RefID
+    WHERE d.ReportType IN (N'1', N'2') AND d.FormulaType = 0
+    ORDER BY
+      r.Year,
+      r.Period,
+      r.RefType,
+      d.ReportType,
+      d.ItemIndex,
+      d.SortOrder,
+      d.ReportDetailID
