@@ -81,7 +81,28 @@ def raw_answer():
                 }
             ],
             "financial_reports": [
-                {"ReportType": 1, "ItemCode": "100", "Amount": 1000}
+                {
+                    "ReportDetailID": "report-detail-1",
+                    "RefID": "report-1",
+                    "ReportType": "1",
+                    "ItemID": "item-report-1",
+                    "ItemCode": "100",
+                    "ItemIndex": 1,
+                    "SortOrder": 1,
+                    "Category": 0,
+                    "FormulaType": 0,
+                    "Amount": 1000,
+                    "PrevAmount": 900,
+                    "OtherAmount": 0,
+                    "OtherPrevAmount": 0,
+                    "ReportRefType": 100,
+                    "DisplayOnBook": 0,
+                    "Period": 12,
+                    "Year": 2024,
+                    "FromDate": "2024-01-01",
+                    "ToDate": "2024-12-31",
+                    "CurrencyID": "VND",
+                }
             ],
         }
     )
@@ -126,4 +147,6 @@ def test_master_is_extracted_once_and_gets_snapshot_id(tmp_path):
     assert master.answer_data_hash
     assert master.inventory.item_count == 1
     assert master.inventory.total_qty == 10
+    assert len(master.financial_reports.lines) == 1
+    assert master.financial_reports.lines[0].report_detail_id == "report-detail-1"
     assert Path(master.answer_snapshot_path).exists()
