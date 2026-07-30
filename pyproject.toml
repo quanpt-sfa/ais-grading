@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "chamdiem-htttkt"
+version = "1.0.0"
+description = "Hệ thống chấm điểm thi HTTTKT (MISA SME.NET)"
+requires-python = ">=3.10"
+dependencies = [
+    "pyodbc>=5.0",
+    "pyyaml>=6.0",
+    "openpyxl>=3.1",
+    "click>=8.1",
+    "rich>=13.0",
+    "tabulate>=0.9",
+]
+
+[project.scripts]
+chamdiem = "src.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]

@@ -1,0 +1,30 @@
+server:
+  host: .\SQLEXPRESS
+  auth: windows
+  driver: SQL Server Native Client 11.0
+answer:
+  database: HungBinh2024
+  excel_fallback: d12.xlsm
+  excel_sheet_answer: DapAn
+scoring:
+  scale: 10.0
+  tolerance: 1.0
+  weights:
+    inventory_balance: 10.0
+    fixed_asset_balance: 5.0
+    general_balance: 25.0
+    transactions: 55.0
+    financial_reports: 5.0
+    audit_analysis: 0.0
+student:
+  source: excel
+  excel_file: d12.xlsm
+  excel_sheet_list: DanhSach
+  db_name_pattern: ^\d{8}$
+traceability:
+  enabled: true
+  level: 2
+output:
+  directory: output
+  grade_file: bangdiem_{timestamp}.xlsx
+  detail_dir: details

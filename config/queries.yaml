@@ -1,0 +1,162 @@
+# =============================================================================
+# Tập hợp SQL queries cho các phân hệ chấm điểm HTTTKT (MISA SME.NET)
+# =============================================================================
+
+# 1. Số dư hàng tồn kho
+inventory_balance:
+  description: "Lấy số dư hàng tồn kho mở đầu (RefNo='opn')"
+  query: >
+    SELECT 
+      COUNT(*) as item_count, 
+      ISNULL(SUM(InwardQuantityBalance), 0) as total_qty, 
+      ISNULL(SUM(InwardAmountBalance), 0) as total_amount 
+    FROM InventoryLedger 
+    WHERE RefNo = 'opn'
+
+# 2. Số dư tài sản cố định
+fixed_asset_balance:
+  description: "Lấy danh sách và số dư tài sản cố định mở đầu (RefNo='opn')"
+  query: >
+    SELECT 
+      FixedAssetCode,
+      FixedAssetName,
+      OrgPrice, 
+      DepreciationAmount, 
+      AccumDepreciationAmount, 
+      LifeTimeInMonth, 
+      LifeTimeRemainingInMonth 
+    FROM FixedAsset 
+    WHERE RefNo = 'opn'
+    ORDER BY FixedAssetCode
+
+# 3. Số dư tổng hợp sổ cái
+general_balance:
+  description: "Lấy số dư tài khoản mở đầu (CorrespondingAccountNumber IS NULL)"
+  query: >
+    SELECT 
+      LEFT(AccountNumber, 3) as AccountCode, 
+      ISNULL(SUM(DebitAmount), 0) as DebitAmount, 
+      ISNULL(SUM(DebitAmountOC), 0) as DebitAmountOC, 
+      ISNULL(SUM(CreditAmount), 0) as CreditAmount, 
+      ISNULL(SUM(CreditAmountOC), 0) as CreditAmountOC, 
+      ISNULL(SUM(MainQuantity), 0) as Quantity 
+    FROM GeneralLedger 
+    WHERE CorrespondingAccountNumber IS NULL 
+    GROUP BY LEFT(AccountNumber, 3)
+    ORDER BY AccountCode
+
+# 4. Nghiệp vụ phát sinh trong kỳ
+transactions:
+  description: "Lấy phát sinh các nghiệp vụ trong kỳ gom theo ngày/tháng và tài khoản 3 số"
+  query: >
+    SELECT 
+      Day(Refdate) + Month(refdate) * 100 as TaskID, 
+      LEFT(AccountNumber, 3) as AccountCode,
+      ISNULL(SUM(DebitAmount - CreditAmount), 0) as Amount,
+      ISNULL(SUM(DebitAmountOC - CreditAmountOC), 0) as AmountOC,
+      ISNULL(SUM(CASE WHEN LEFT(AccountNumber, 2) = '15' OR AccountNumber LIKE '511%' THEN MainQuantity ELSE 0 END), 0) as Quantity
+    FROM GeneralLedger 
+    WHERE RefNo <> 'OPN'
+    GROUP BY Day(Refdate) + Month(refdate) * 100, LEFT(AccountNumber, 3)
+    HAVING SUM(DebitAmount - CreditAmount) <> 0
+    ORDER BY TaskID, AccountCode
+
+# 5. Báo cáo tài chính
+financial_reports:
+  description: "Lấy số liệu Báo cáo tài chính (Bảng CĐKT & Báo cáo KQKD)"
+  query: >
+    SELECT 
+      ReportType, 
+      ItemCode, 
+      ISNULL(Amount, 0) as Amount 
+    FROM FRReportDetail 
+    WHERE Amount <> 0 AND ReportType IN (1, 2) AND FormulaType = 0
+    ORDER BY ReportType, ItemCode
+
+# 6. Thông tin máy tính & đăng nhập sinh viên
+computer_name:
+  description: "Lấy danh sách máy tính làm bài từ audit log"
+  query: >
+    SELECT DISTINCT ComputerName 
+    FROM MSC_AudittingLog 
+    WHERE ComputerName <> 'ADMIN-D13' AND ComputerName IS NOT NULL AND ComputerName <> ''
+
+student_info:
+  description: "Lấy thông tin tài khoản người dùng từ MSC_User"
+  query: >
+    SELECT UserName, FullName, FirstName, LastName 
+    FROM MSC_User 
+    WHERE UserName <> '0983125672' AND MISAID IS NOT NULL
+
+# 7. Traceability — Theo vết chứng từ
+trace_purchase_orders:
+  query: >
+    SELECT po.RefNo, po.RefDate, po.AccountObjectName, po.TotalAmount
+    FROM PUOrder po
+    ORDER BY po.RefDate
+
+trace_purchase_vouchers:
+  query: >
+    SELECT ISNULL(pv.RefNoFinance, pv.RefNoManagement) as RefNo, pv.RefDate, pv.RefType, pv.AccountObjectName, pv.TotalAmount
+    FROM PUVoucher pv
+    ORDER BY pv.RefDate
+
+trace_sales_orders:
+  query: >
+    SELECT so.RefNo, so.RefDate, so.AccountObjectName, so.TotalAmount
+    FROM SAOrder so
+    ORDER BY so.RefDate
+
+trace_sales_vouchers:
+  query: >
+    SELECT ISNULL(sv.RefNoFinance, sv.RefNoManagement) as RefNo, sv.RefDate, sv.RefType, sv.AccountObjectName, sv.TotalAmount
+    FROM SAVoucher sv
+    ORDER BY sv.RefDate
+
+trace_voucher_links:
+  query: >
+    SELECT RefID1, RefID2, RefType1, RefType2, RefNoFinance1, RefNoFinance2
+    FROM VoucherReference
+
+# 8. Audit Log Analysis
+audit_timeline:
+  query: >
+    SELECT 
+      Time, LoginName, ComputerName, ComputerIP,
+      ApplicationPartAlias, PermissionTypeAlias,
+      RefType, Reference, RefID, Description
+    FROM MSC_AudittingLog
+    ORDER BY Time
+
+audit_workflow_steps:
+  query: >
+    SELECT 
+      Time, ApplicationPartAlias, PermissionTypeAlias,
+      RefType, Reference, RefID
+    FROM MSC_AudittingLog
+    WHERE PermissionTypeAlias IN (N'Thêm', N'Ghi sổ', N'Sửa', N'Xóa', N'Bỏ ghi')
+      AND RefType > 0
+    ORDER BY Time
+
+audit_computer_forensics:
+  query: >
+    SELECT 
+      ComputerName, ComputerIP,
+      MIN(Time) as FirstAction,
+      MAX(Time) as LastAction,
+      COUNT(*) as ActionCount,
+      COUNT(DISTINCT LoginName) as DistinctLogins
+    FROM MSC_AudittingLog
+    GROUP BY ComputerName, ComputerIP
+
+audit_process_compliance:
+  query: >
+    SELECT 
+      ApplicationPartAlias, PermissionTypeAlias,
+      MIN(Time) as FirstOccurrence,
+      MAX(Time) as LastOccurrence,
+      COUNT(*) as ActionCount
+    FROM MSC_AudittingLog
+    WHERE PermissionTypeAlias IN (N'Thêm', N'Ghi sổ')
+    GROUP BY ApplicationPartAlias, PermissionTypeAlias
+    ORDER BY MIN(Time)
