@@ -42,6 +42,17 @@ class AnswerValidator:
         "inventory_ledger_lines",
         "general_ledger_lines",
     )
+    REPORT_HEADER_FIELDS = (
+        "ReportRefType",
+        "DisplayOnBook",
+        "BranchID",
+        "Period",
+        "Year",
+        "FromDate",
+        "ToDate",
+        "CurrencyID",
+        "IsReportFinanceAudit",
+    )
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None):
         cfg = dict(config or {})
@@ -66,6 +77,7 @@ class AnswerValidator:
         self._validate_required_queries(raw, report)
         self._validate_row_scope(raw, scope, report)
         self._validate_duplicate_keys(raw, report)
+        self._validate_financial_reports(raw.get("financial_reports", ()), report)
         self._validate_graph(graph, report)
         report.metrics.update(
             {
@@ -150,6 +162,20 @@ class AnswerValidator:
                         f"{query_id}[{index}] is after answer scope"
                     )
 
+        for index, row in enumerate(raw.get("financial_reports", ())):
+            report_from = self._date(row.get("FromDate"))
+            report_to = self._date(row.get("ToDate"))
+            report_year = self._int_or_none(row.get("Year"))
+            if report_from and report_to and report_from > report_to:
+                report.errors.append(
+                    f"financial_reports[{index}] has FromDate after ToDate"
+                )
+            if report_from is None and report_to is None and report_year is None:
+                report.warnings.append(
+                    f"financial_reports[{index}] has no period metadata; "
+                    "cross-database matching will use a reduced key"
+                )
+
     def _validate_duplicate_keys(
         self,
         raw: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -169,7 +195,9 @@ class AnswerValidator:
             "inventory_inward_lines": ("RefID", "RefDetailID"),
             "inventory_ledger_lines": ("InventoryLedgerID",),
             "general_ledger_lines": ("GeneralLedgerID",),
-            "financial_reports": ("ReportType", "ItemCode"),
+            # ReportType + ItemCode không duy nhất. Chỉ khóa kỹ thuật dòng được
+            # phép quyết định trùng dữ liệu trong snapshot cục bộ.
+            "financial_reports": ("ReportDetailID",),
         }
         for query_id, fields in checks.items():
             rows = raw.get(query_id, ())
@@ -179,6 +207,59 @@ class AnswerValidator:
                 report.errors.append(
                     f"duplicate canonical key in {query_id}: {sample}"
                 )
+
+    def _validate_financial_reports(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        report: AnswerValidationReport,
+    ) -> None:
+        instance_ids = set()
+        report_type_item_counts: Dict[Tuple[Any, Any], int] = {}
+        header_by_ref: Dict[Any, Tuple[Any, ...]] = {}
+
+        for index, row in enumerate(rows):
+            detail_id = row.get("ReportDetailID")
+            ref_id = row.get("RefID")
+            if detail_id in (None, ""):
+                report.errors.append(
+                    f"financial_reports[{index}] has no ReportDetailID"
+                )
+            if ref_id in (None, ""):
+                report.errors.append(
+                    f"financial_reports[{index}] has no RefID/report instance"
+                )
+            else:
+                instance_ids.add(str(ref_id))
+                header = tuple(row.get(field) for field in self.REPORT_HEADER_FIELDS)
+                previous = header_by_ref.setdefault(ref_id, header)
+                if previous != header:
+                    report.errors.append(
+                        f"financial report RefID {ref_id} has inconsistent header metadata"
+                    )
+
+            business_key = (row.get("ReportType"), row.get("ItemCode"))
+            report_type_item_counts[business_key] = (
+                report_type_item_counts.get(business_key, 0) + 1
+            )
+
+        repeated_groups = {
+            key: count
+            for key, count in report_type_item_counts.items()
+            if count > 1
+        }
+        if repeated_groups:
+            report.warnings.append(
+                "ReportType + ItemCode is non-unique in financial_reports; "
+                "multiplicity is preserved and graded as report-line multisets"
+            )
+
+        report.metrics.update(
+            {
+                "financial_report_line_count": len(rows),
+                "financial_report_instance_count": len(instance_ids),
+                "non_unique_report_type_item_code_groups": len(repeated_groups),
+            }
+        )
 
     def _validate_graph(
         self,
@@ -268,6 +349,15 @@ class AnswerValidator:
                 continue
             return True
         return False
+
+    @staticmethod
+    def _int_or_none(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _date(value: Any) -> Optional[date]:
