@@ -2,10 +2,27 @@ server:
   host: .\SQLEXPRESS
   auth: windows
   driver: SQL Server Native Client 11.0
+
 answer:
+  source: database
   database: HungBinh2024
-  excel_fallback: d12.xlsm
-  excel_sheet_answer: DapAn
+  version: hung-binh-2024-v1
+  strict: true
+  query_file: config/answer_queries.yaml
+  snapshot_directory: data/answer_snapshots
+  transaction_isolation: SERIALIZABLE
+  scope:
+    start: '2024-01-01'
+    end: '2024-12-31'
+    branch_id: null
+  validation:
+    require_scope: true
+    require_postings: true
+    require_financial_reports: true
+    required_workflow_roles:
+      - PU_ORDER
+      - PU_VOUCHER
+
 scoring:
   scale: 10.0
   tolerance: 1.0
@@ -16,23 +33,25 @@ scoring:
     transactions: 55.0
     financial_reports: 5.0
     audit_analysis: 0.0
+
 entity_matching:
   # Mã, tên và GUID không được dùng làm khóa giữa hai database.
-  # Chỉ dấu neo đầu kỳ quyết định một đối tượng có được nhận diện hay không.
   max_anchor_cost: 35.0
   ambiguity_margin: 0.5
-  # Nghiệp vụ chỉ phá hòa giữa các đối tượng cùng đầu kỳ, không được loại ánh xạ.
   event_tiebreak_weight: 0.20
   event_tiebreak_cap: 25.0
   max_exact_assignment_size: 18
+
 student:
   source: excel
   excel_file: d12.xlsm
   excel_sheet_list: DanhSach
   db_name_pattern: ^\d{8}$
+
 traceability:
   enabled: true
   level: 2
+
 output:
   directory: output
   grade_file: bangdiem_{timestamp}.xlsx
