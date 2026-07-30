@@ -97,13 +97,17 @@ class EntityResolver:
         self,
         graph: AccountingGraph,
     ) -> Dict[str, InventoryFingerprint]:
-        entity_ids = set(graph.entities)
-        entity_ids.update(
+        # Chỉ ghép các đối tượng thực sự tham gia bài thi. Danh mục MISA có thể
+        # chứa nhiều mã hệ thống/không sử dụng; đưa toàn bộ catalog vào sẽ tạo
+        # ánh xạ và dòng thừa giả.
+        entity_ids = {
             row.entity_id for row in graph.opening_balances if row.entity_id
-        )
+        }
         entity_ids.update(
             event.entity_id for event in graph.events if event.entity_id
         )
+        if not entity_ids:
+            entity_ids = set(graph.entities)
 
         result: Dict[str, InventoryFingerprint] = {}
         for entity_id in sorted(entity_ids):
