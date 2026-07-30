@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Mapping, Tuple, Any, Optional
 
 
 @dataclass
@@ -90,14 +90,45 @@ class FinancialReportLine:
     is_report_finance_audit: Optional[bool] = None
 
 
-@dataclass
+@dataclass(init=False)
 class FinancialReportAnswer:
     # Dùng list để bảo toàn multiplicity. ReportType + ItemCode không duy nhất.
-    lines: List[FinancialReportLine] = field(default_factory=list)
+    lines: List[FinancialReportLine]
+
+    def __init__(
+        self,
+        lines: Optional[List[FinancialReportLine]] = None,
+        items: Optional[Mapping[Tuple[str, str], Decimal]] = None,
+    ):
+        if lines is not None and items is not None:
+            raise ValueError("Pass either financial-report lines or legacy items")
+        if lines is not None:
+            self.lines = list(lines)
+            return
+
+        # Đọc cache/API cũ. Mapping cũ vốn không thể biểu diễn duplicate; dữ liệu
+        # mới luôn phải đi qua ``lines`` hoặc immutable answer snapshot.
+        self.lines = []
+        for key, amount in (items or {}).items():
+            report_type, item_code = key[:2]
+            self.lines.append(
+                FinancialReportLine(
+                    report_detail_id=None,
+                    report_ref_id=None,
+                    report_type=str(report_type),
+                    item_id=None,
+                    item_code=str(item_code),
+                    item_index=None,
+                    sort_order=None,
+                    category=None,
+                    formula_type=None,
+                    amount=Decimal(str(amount)),
+                )
+            )
 
     @property
     def items(self) -> List[FinancialReportLine]:
-        """Alias tương thích cho code cũ từng đọc ``answer.items``."""
+        """Alias đọc tương thích; không còn là dictionary."""
         return self.lines
 
 
