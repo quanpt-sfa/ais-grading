@@ -55,9 +55,50 @@ class TransactionAnswer:
     entries: Dict[Tuple[int, str], TransactionItem] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class FinancialReportLine:
+    """Một dòng của một report instance trong database cục bộ.
+
+    ``ReportDetailID`` và ``report_ref_id`` chỉ là khóa kỹ thuật bên trong một
+    database. Chúng được giữ để audit/snapshot, nhưng không được so trực tiếp
+    giữa database đáp án và database sinh viên.
+    """
+
+    report_detail_id: Optional[str]
+    report_ref_id: Optional[str]
+    report_type: str
+    item_id: Optional[str]
+    item_code: str
+    item_index: Optional[int]
+    sort_order: Optional[int]
+    category: Optional[int]
+    formula_type: Optional[int]
+    amount: Decimal
+    prev_amount: Decimal = Decimal("0")
+    other_amount: Decimal = Decimal("0")
+    other_prev_amount: Decimal = Decimal("0")
+    report_ref_type: Optional[int] = None
+    display_on_book: Optional[int] = None
+    branch_id: Optional[str] = None
+    period: Optional[int] = None
+    year: Optional[int] = None
+    period_name: Optional[str] = None
+    report_name: Optional[str] = None
+    from_date: Any = None
+    to_date: Any = None
+    currency_id: Optional[str] = None
+    is_report_finance_audit: Optional[bool] = None
+
+
 @dataclass
 class FinancialReportAnswer:
-    items: Dict[Tuple[str, str], Decimal] = field(default_factory=dict)
+    # Dùng list để bảo toàn multiplicity. ReportType + ItemCode không duy nhất.
+    lines: List[FinancialReportLine] = field(default_factory=list)
+
+    @property
+    def items(self) -> List[FinancialReportLine]:
+        """Alias tương thích cho code cũ từng đọc ``answer.items``."""
+        return self.lines
 
 
 @dataclass(frozen=True)
