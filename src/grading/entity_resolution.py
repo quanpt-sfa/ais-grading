@@ -25,9 +25,9 @@ class EntityResolution:
     missing_answer_entities: List[str] = field(default_factory=list)
     extra_student_entities: List[str] = field(default_factory=list)
     ambiguous_candidates: Dict[str, List[str]] = field(default_factory=dict)
-    # costs là chi phí xếp hạng: dấu neo định danh + tie-break nghiệp vụ có giới hạn.
+    # Chi phí xếp hạng: dấu neo định danh + tie-break nghiệp vụ có giới hạn.
     costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
-    # anchor_costs chỉ chứa bằng chứng dùng để quyết định có nhận diện được hay không.
+    # Chỉ chứa bằng chứng được phép quyết định có nhận diện được hay không.
     anchor_costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
 
 
@@ -68,6 +68,7 @@ class EntityResolver:
         student_ids = sorted(student_fp)
 
         result = EntityResolution()
+        assignment_costs: Dict[Tuple[str, str], float] = {}
         for answer_id in answer_ids:
             for student_id in student_ids:
                 answer = answer_fp[answer_id]
@@ -83,10 +84,21 @@ class EntityResolver:
                     event_cost * self.event_tiebreak_weight,
                     self.event_tiebreak_cap,
                 )
-                result.anchor_costs[(answer_id, student_id)] = anchor_cost
-                result.costs[(answer_id, student_id)] = ranking_cost
+                key = (answer_id, student_id)
+                result.anchor_costs[key] = anchor_cost
+                result.costs[key] = ranking_cost
+                # Cặp không đạt dấu neo không được phép thắng bài toán gán.
+                assignment_costs[key] = (
+                    ranking_cost
+                    if anchor_cost <= self.max_anchor_cost
+                    else self.MISSING_COST * 2 + anchor_cost
+                )
 
-        assignment = self._assign(answer_ids, student_ids, result.costs)
+        assignment = self._assign(
+            answer_ids,
+            student_ids,
+            assignment_costs,
+        )
         used_students = set()
         for answer_id, student_id in assignment.items():
             if student_id is None:
@@ -312,21 +324,9 @@ class EntityResolver:
         for cost, answer_id, student_id in pairs:
             if answer_id in used_answers or student_id in used_students:
                 continue
-            anchor_cost = self._last_anchor_cost_placeholder(
-                answer_id, student_id
-            )
-            if anchor_cost is not None and anchor_cost > self.max_anchor_cost:
+            if cost >= self.MISSING_COST:
                 continue
             assignment[answer_id] = student_id
             used_answers.add(answer_id)
             used_students.add(student_id)
         return assignment
-
-    @staticmethod
-    def _last_anchor_cost_placeholder(
-        answer_id: str,
-        student_id: str,
-    ) -> Optional[float]:
-        # Greedy assignment is only used for unusually large exams. Eligibility
-        # is rechecked in resolve() against EntityResolution.anchor_costs.
-        return None
