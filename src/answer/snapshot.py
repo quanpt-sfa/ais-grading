@@ -121,7 +121,13 @@ class AnswerSnapshotStore:
         if path.exists():
             existing = json.loads(path.read_text(encoding="utf-8"))
             expected = snapshot.to_dict()
-            if existing != expected:
+            # extracted_at is provenance, not part of the content-addressed ID.
+            # Re-extracting identical data reuses the original immutable file.
+            existing_identity = dict(existing)
+            expected_identity = dict(expected)
+            existing_identity.pop("extracted_at", None)
+            expected_identity.pop("extracted_at", None)
+            if existing_identity != expected_identity:
                 raise RuntimeError(
                     f"Immutable answer snapshot differs from existing file: {path}"
                 )
