@@ -11,6 +11,7 @@ from src.answer.models import (
     AccountBalanceItem,
     AccountingGraph,
     FinancialReportAnswer,
+    FinancialReportLine,
     FixedAssetAnswer,
     FixedAssetItem,
     GeneralBalanceAnswer,
@@ -163,6 +164,7 @@ class AnswerLoader:
         start = self._date(self.scope.get("start"))
         end = self._date(self.scope.get("end"))
         branch_id = self.scope.get("branch_id")
+        branch_token = str(branch_id) if branch_id not in (None, "") else None
         filtered: Dict[str, list] = {}
         excluded: Dict[str, int] = {}
 
@@ -170,10 +172,20 @@ class AnswerLoader:
             output = []
             excluded_count = 0
             for row in rows:
-                if branch_id and row.get("BranchID") not in (None, branch_id):
+                row_branch = row.get("BranchID")
+                if (
+                    branch_token is not None
+                    and row_branch is not None
+                    and str(row_branch) != branch_token
+                ):
                     excluded_count += 1
                     continue
-                if query_id in self.DATE_SCOPED_QUERY_IDS:
+
+                if query_id == "financial_reports":
+                    if not self._financial_report_in_scope(row, start, end):
+                        excluded_count += 1
+                        continue
+                elif query_id in self.DATE_SCOPED_QUERY_IDS:
                     ref_date = self._date(
                         row.get("RefDate") or row.get("PostedDate")
                     )
@@ -183,10 +195,35 @@ class AnswerLoader:
                     if end and ref_date and ref_date > end:
                         excluded_count += 1
                         continue
+
                 output.append(dict(row))
             filtered[query_id] = output
             excluded[query_id] = excluded_count
         return filtered, excluded
+
+    @classmethod
+    def _financial_report_in_scope(
+        cls,
+        row: Mapping[str, Any],
+        start: Optional[date],
+        end: Optional[date],
+    ) -> bool:
+        report_from = cls._date(row.get("FromDate"))
+        report_to = cls._date(row.get("ToDate"))
+        report_year = cls._int_or_none(row.get("Year"))
+
+        # Giữ report instance có kỳ giao với scope. Không dùng ngày tạo báo cáo,
+        # vì ngày tạo có thể nằm sau ngày kết thúc kỳ kế toán.
+        if start and report_to and report_to < start:
+            return False
+        if end and report_from and report_from > end:
+            return False
+        if report_from is None and report_to is None and report_year is not None:
+            if start and report_year < start.year:
+                return False
+            if end and report_year > end.year:
+                return False
+        return True
 
     def _build_master(
         self,
@@ -303,14 +340,70 @@ class AnswerLoader:
     def _derive_financial_reports(
         rows: Iterable[Mapping[str, Any]],
     ) -> FinancialReportAnswer:
-        items: Dict[Tuple[str, str], Decimal] = {}
+        lines = []
         for row in rows:
-            key = (
-                str(row.get("ReportType") or "").strip(),
-                str(row.get("ItemCode") or "").strip(),
+            lines.append(
+                FinancialReportLine(
+                    report_detail_id=AnswerLoader._text(
+                        row.get("ReportDetailID")
+                    ),
+                    report_ref_id=AnswerLoader._text(row.get("RefID")),
+                    report_type=str(row.get("ReportType") or "").strip(),
+                    item_id=AnswerLoader._text(row.get("ItemID")),
+                    item_code=str(row.get("ItemCode") or "").strip(),
+                    item_index=AnswerLoader._int_or_none(
+                        row.get("ItemIndex")
+                    ),
+                    sort_order=AnswerLoader._int_or_none(
+                        row.get("SortOrder")
+                    ),
+                    category=AnswerLoader._int_or_none(row.get("Category")),
+                    formula_type=AnswerLoader._int_or_none(
+                        row.get("FormulaType")
+                    ),
+                    amount=Decimal(str(row.get("Amount") or 0)),
+                    prev_amount=Decimal(str(row.get("PrevAmount") or 0)),
+                    other_amount=Decimal(str(row.get("OtherAmount") or 0)),
+                    other_prev_amount=Decimal(
+                        str(row.get("OtherPrevAmount") or 0)
+                    ),
+                    report_ref_type=AnswerLoader._int_or_none(
+                        row.get("ReportRefType")
+                    ),
+                    display_on_book=AnswerLoader._int_or_none(
+                        row.get("DisplayOnBook")
+                    ),
+                    branch_id=AnswerLoader._text(row.get("BranchID")),
+                    period=AnswerLoader._int_or_none(row.get("Period")),
+                    year=AnswerLoader._int_or_none(row.get("Year")),
+                    period_name=AnswerLoader._text(row.get("PeriodName")),
+                    report_name=AnswerLoader._text(row.get("ReportName")),
+                    from_date=row.get("FromDate"),
+                    to_date=row.get("ToDate"),
+                    currency_id=AnswerLoader._text(row.get("CurrencyID")),
+                    is_report_finance_audit=(
+                        bool(row.get("IsReportFinanceAudit"))
+                        if row.get("IsReportFinanceAudit") is not None
+                        else None
+                    ),
+                )
             )
-            items[key] = Decimal(str(row.get("Amount") or 0))
-        return FinancialReportAnswer(items=items)
+        return FinancialReportAnswer(lines=lines)
+
+    @staticmethod
+    def _text(value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        return str(value)
+
+    @staticmethod
+    def _int_or_none(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _date(value: Any) -> Optional[date]:
