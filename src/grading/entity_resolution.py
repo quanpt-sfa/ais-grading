@@ -25,18 +25,34 @@ class EntityResolution:
     missing_answer_entities: List[str] = field(default_factory=list)
     extra_student_entities: List[str] = field(default_factory=list)
     ambiguous_candidates: Dict[str, List[str]] = field(default_factory=dict)
+    # costs là chi phí xếp hạng: dấu neo định danh + tie-break nghiệp vụ có giới hạn.
     costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
+    # anchor_costs chỉ chứa bằng chứng dùng để quyết định có nhận diện được hay không.
+    anchor_costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
 
 
 class EntityResolver:
-    """Ghép mặt hàng đáp án với mặt hàng sinh viên bằng dấu vân tay kinh tế."""
+    """Ghép mặt hàng đáp án với mặt hàng sinh viên theo hai tầng.
+
+    Tầng định danh chỉ dùng loại đối tượng, đơn vị và số dư đầu kỳ. Nghiệp vụ
+    phát sinh chỉ là tie-break nhẹ khi nhiều đối tượng có cùng dấu neo. Vì vậy,
+    sinh viên làm đúng đầu kỳ nhưng sai các nghiệp vụ sau vẫn được nhận diện;
+    các sai sót nghiệp vụ được trừ ở comparator thay vì biến thành ``MISSING``.
+    """
 
     MISSING_COST = 250.0
 
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
-        self.max_cost = float(cfg.get("max_cost", 80.0))
+        # Tương thích với cấu hình cũ dùng max_cost.
+        self.max_anchor_cost = float(
+            cfg.get("max_anchor_cost", cfg.get("max_cost", 35.0))
+        )
         self.ambiguity_margin = float(cfg.get("ambiguity_margin", 0.5))
+        self.event_tiebreak_weight = float(
+            cfg.get("event_tiebreak_weight", 0.20)
+        )
+        self.event_tiebreak_cap = float(cfg.get("event_tiebreak_cap", 25.0))
         self.max_exact_assignment_size = int(
             cfg.get("max_exact_assignment_size", 18)
         )
@@ -54,37 +70,57 @@ class EntityResolver:
         result = EntityResolution()
         for answer_id in answer_ids:
             for student_id in student_ids:
-                result.costs[(answer_id, student_id)] = self._cost(
-                    answer_fp[answer_id], student_fp[student_id]
+                answer = answer_fp[answer_id]
+                student = student_fp[student_id]
+                anchor_cost = self._anchor_cost(answer, student)
+                event_cost = self._event_distance(
+                    answer.event_signature,
+                    student.event_signature,
                 )
+                # Nghiệp vụ chỉ hỗ trợ chọn giữa các ứng viên cùng dấu neo. Nó
+                # không được tăng vô hạn và không được làm mất nhận diện.
+                ranking_cost = anchor_cost + min(
+                    event_cost * self.event_tiebreak_weight,
+                    self.event_tiebreak_cap,
+                )
+                result.anchor_costs[(answer_id, student_id)] = anchor_cost
+                result.costs[(answer_id, student_id)] = ranking_cost
 
         assignment = self._assign(answer_ids, student_ids, result.costs)
         used_students = set()
         for answer_id, student_id in assignment.items():
-            if (
-                student_id is None
-                or result.costs[(answer_id, student_id)] > self.max_cost
-            ):
+            if student_id is None:
+                result.missing_answer_entities.append(answer_id)
+                continue
+
+            anchor_cost = result.anchor_costs[(answer_id, student_id)]
+            if anchor_cost > self.max_anchor_cost:
                 result.missing_answer_entities.append(answer_id)
                 continue
 
             result.mapping[answer_id] = student_id
             used_students.add(student_id)
-            ranked = sorted(
+
+            # Ambiguity được xác định từ dấu neo, không phải từ mức độ làm đúng
+            # nghiệp vụ. Hai mặt hàng cùng đầu kỳ vẫn là một nhóm tương đương
+            # dù một trong hai có chuỗi nghiệp vụ gần đáp án hơn.
+            ranked_anchors = sorted(
                 (
-                    (result.costs[(answer_id, candidate)], candidate)
+                    (result.anchor_costs[(answer_id, candidate)], candidate)
                     for candidate in student_ids
                 ),
                 key=lambda item: (item[0], item[1]),
             )
-            if len(ranked) >= 2 and (
-                ranked[1][0] - ranked[0][0] <= self.ambiguity_margin
-            ):
-                result.ambiguous_candidates[answer_id] = [
+            if ranked_anchors:
+                best_anchor = ranked_anchors[0][0]
+                candidates = [
                     candidate
-                    for cost, candidate in ranked
-                    if cost - ranked[0][0] <= self.ambiguity_margin
+                    for cost, candidate in ranked_anchors
+                    if cost <= self.max_anchor_cost
+                    and cost - best_anchor <= self.ambiguity_margin
                 ]
+                if len(candidates) >= 2:
+                    result.ambiguous_candidates[answer_id] = candidates
 
         result.extra_student_entities = [
             student_id
@@ -158,6 +194,38 @@ class EntityResolver:
         scale = max(abs(left), abs(right), Decimal("1"))
         return float(abs(left - right) / scale)
 
+    def _anchor_cost(
+        self,
+        answer: InventoryFingerprint,
+        student: InventoryFingerprint,
+    ) -> float:
+        """Chi phí định danh; tuyệt đối không chứa nghiệp vụ phát sinh."""
+        cost = 0.0
+        if (
+            answer.item_type is not None
+            and student.item_type is not None
+            and answer.item_type != student.item_type
+        ):
+            cost += 30.0
+        if (
+            answer.unit_name
+            and student.unit_name
+            and answer.unit_name.strip().casefold()
+            != student.unit_name.strip().casefold()
+        ):
+            cost += 8.0
+
+        cost += self._relative_error(
+            answer.opening_quantity, student.opening_quantity
+        ) * 25.0
+        cost += self._relative_error(
+            answer.opening_unit_price, student.opening_unit_price
+        ) * 15.0
+        cost += self._relative_error(
+            answer.opening_amount, student.opening_amount
+        ) * 10.0
+        return cost
+
     def _event_distance(
         self,
         left: Sequence[Tuple[str, Decimal, Decimal, Decimal]],
@@ -177,39 +245,6 @@ class EntityResolver:
                 total += self._relative_error(left_price, right_price) * 8.0
                 total += self._relative_error(left_amount, right_amount) * 8.0
         return total
-
-    def _cost(
-        self,
-        answer: InventoryFingerprint,
-        student: InventoryFingerprint,
-    ) -> float:
-        cost = 0.0
-        if (
-            answer.item_type is not None
-            and student.item_type is not None
-            and answer.item_type != student.item_type
-        ):
-            cost += 30.0
-        if (
-            answer.unit_name
-            and student.unit_name
-            and answer.unit_name != student.unit_name
-        ):
-            cost += 8.0
-
-        cost += self._relative_error(
-            answer.opening_quantity, student.opening_quantity
-        ) * 25.0
-        cost += self._relative_error(
-            answer.opening_unit_price, student.opening_unit_price
-        ) * 15.0
-        cost += self._relative_error(
-            answer.opening_amount, student.opening_amount
-        ) * 10.0
-        cost += self._event_distance(
-            answer.event_signature, student.event_signature
-        )
-        return cost
 
     def _assign(
         self,
@@ -277,9 +312,21 @@ class EntityResolver:
         for cost, answer_id, student_id in pairs:
             if answer_id in used_answers or student_id in used_students:
                 continue
-            if cost > self.max_cost:
+            anchor_cost = self._last_anchor_cost_placeholder(
+                answer_id, student_id
+            )
+            if anchor_cost is not None and anchor_cost > self.max_anchor_cost:
                 continue
             assignment[answer_id] = student_id
             used_answers.add(answer_id)
             used_students.add(student_id)
         return assignment
+
+    @staticmethod
+    def _last_anchor_cost_placeholder(
+        answer_id: str,
+        student_id: str,
+    ) -> Optional[float]:
+        # Greedy assignment is only used for unusually large exams. Eligibility
+        # is rechecked in resolve() against EntityResolution.anchor_costs.
+        return None
