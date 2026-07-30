@@ -9,6 +9,7 @@ __all__ = [
     "AccountBalanceItem",
     "TransactionAnswer",
     "TransactionItem",
+    "FinancialReportLine",
     "FinancialReportAnswer",
     "AnswerLoader",
     "AnswerSnapshot",
@@ -27,6 +28,7 @@ def __getattr__(name):
         "AccountBalanceItem",
         "TransactionAnswer",
         "TransactionItem",
+        "FinancialReportLine",
         "FinancialReportAnswer",
     }
     if name in model_names:
