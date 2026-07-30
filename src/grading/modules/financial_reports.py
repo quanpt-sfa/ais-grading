@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple
+from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 from src.grading.base import BaseModuleComparator, CompareResult
 from src.answer.models import (
@@ -17,9 +17,9 @@ class FinancialReportsComparator(BaseModuleComparator):
     """Chấm BCTC theo report instance và multiset dòng báo cáo.
 
     ``ReportType + ItemCode`` không phải khóa duy nhất. Các dòng có cùng cấu
-    trúc được giữ thành multiset và ghép một-một theo giá trị; dòng thiếu/thừa
-    đều làm giảm điểm. GUID cục bộ (RefID/ReportDetailID) không được so trực
-    tiếp giữa database đáp án và database sinh viên.
+    trúc được giữ thành multiset và ghép một-một theo giá trị. GUID cục bộ
+    (RefID/ReportDetailID) chỉ phục vụ audit, không được so trực tiếp giữa hai
+    database.
     """
 
     @property
@@ -81,7 +81,7 @@ class FinancialReportsComparator(BaseModuleComparator):
             use_line_position=use_line_position,
         )
 
-        tol = Decimal(str(tolerance))
+        tolerance_decimal = Decimal(str(tolerance))
         total_items = 0
         matched_items = 0
         details: List[Dict[str, Any]] = []
@@ -90,80 +90,17 @@ class FinancialReportsComparator(BaseModuleComparator):
             set(answer_groups) | set(student_groups),
             key=repr,
         ):
-            expected = sorted(
-                answer_groups.get(key, []),
-                key=self._amount_vector,
+            expected = list(answer_groups.get(key, []))
+            observed = list(student_groups.get(key, []))
+            group_result = self._compare_group(
+                key,
+                expected,
+                observed,
+                tolerance_decimal,
             )
-            observed = sorted(
-                student_groups.get(key, []),
-                key=self._amount_vector,
-            )
-            common = min(len(expected), len(observed))
-
-            for index in range(common):
-                answer_line = expected[index]
-                student_line = observed[index]
-                checks = {
-                    "amount": abs(
-                        student_line.amount - answer_line.amount
-                    )
-                    <= tol,
-                    "prev_amount": abs(
-                        student_line.prev_amount - answer_line.prev_amount
-                    )
-                    <= tol,
-                    "other_amount": abs(
-                        student_line.other_amount - answer_line.other_amount
-                    )
-                    <= tol,
-                    "other_prev_amount": abs(
-                        student_line.other_prev_amount
-                        - answer_line.other_prev_amount
-                    )
-                    <= tol,
-                }
-                line_ok = all(checks.values())
-                total_items += 1
-                if line_ok:
-                    matched_items += 1
-                details.append(
-                    self._detail(
-                        key,
-                        answer_line,
-                        student_line,
-                        checks,
-                        line_ok,
-                        occurrence=index + 1,
-                    )
-                )
-
-            for index, answer_line in enumerate(expected[common:], start=common + 1):
-                total_items += 1
-                details.append(
-                    self._detail(
-                        key,
-                        answer_line,
-                        None,
-                        {"line_exists": False},
-                        False,
-                        occurrence=index,
-                        reason="Thiếu dòng báo cáo trong bài sinh viên",
-                    )
-                )
-
-            for index, student_line in enumerate(observed[common:], start=common + 1):
-                total_items += 1
-                details.append(
-                    self._detail(
-                        key,
-                        None,
-                        student_line,
-                        {"extra_line": False},
-                        False,
-                        occurrence=index,
-                        reason="Dòng báo cáo thừa trong bài sinh viên",
-                    )
-                )
+            total_items += group_result["total_items"]
+            matched_items += group_result["matched_items"]
+            details.extend(group_result["details"])
 
         if total_items == 0:
             total_items = 1
@@ -179,6 +116,212 @@ class FinancialReportsComparator(BaseModuleComparator):
             raw_student=student_data.get("financial_reports", []),
         )
 
+    def _compare_group(
+        self,
+        key: Tuple[Any, ...],
+        expected: List[FinancialReportLine],
+        observed: List[FinancialReportLine],
+        tolerance: Decimal,
+    ) -> Dict[str, Any]:
+        compatible_pairs = self._maximum_compatible_pairs(
+            expected,
+            observed,
+            tolerance,
+        )
+        used_answer = {answer_index for answer_index, _ in compatible_pairs}
+        used_student = {student_index for _, student_index in compatible_pairs}
+
+        # Sau khi khóa số cặp đúng tối đa, ghép các dòng sai còn lại theo tổng
+        # sai lệch nhỏ nhất. Điều này cho một mismatch mỗi dòng thay vì đồng thời
+        # tạo một dòng thiếu và một dòng thừa giả.
+        remaining_pairs = self._minimum_distance_pairs(
+            expected,
+            observed,
+            used_answer,
+            used_student,
+        )
+        used_answer.update(answer_index for answer_index, _ in remaining_pairs)
+        used_student.update(student_index for _, student_index in remaining_pairs)
+
+        details: List[Dict[str, Any]] = []
+        occurrence = 0
+        for answer_index, student_index in sorted(
+            compatible_pairs + remaining_pairs,
+            key=lambda pair: (pair[0], pair[1]),
+        ):
+            occurrence += 1
+            answer_line = expected[answer_index]
+            student_line = observed[student_index]
+            checks = self._line_checks(answer_line, student_line, tolerance)
+            line_ok = all(checks.values())
+            details.append(
+                self._detail(
+                    key,
+                    answer_line,
+                    student_line,
+                    checks,
+                    line_ok,
+                    occurrence=occurrence,
+                )
+            )
+
+        for answer_index, answer_line in enumerate(expected):
+            if answer_index in used_answer:
+                continue
+            occurrence += 1
+            details.append(
+                self._detail(
+                    key,
+                    answer_line,
+                    None,
+                    {"line_exists": False},
+                    False,
+                    occurrence=occurrence,
+                    reason="Thiếu dòng báo cáo trong bài sinh viên",
+                )
+            )
+
+        for student_index, student_line in enumerate(observed):
+            if student_index in used_student:
+                continue
+            occurrence += 1
+            details.append(
+                self._detail(
+                    key,
+                    None,
+                    student_line,
+                    {"extra_line": False},
+                    False,
+                    occurrence=occurrence,
+                    reason="Dòng báo cáo thừa trong bài sinh viên",
+                )
+            )
+
+        return {
+            "total_items": len(details),
+            "matched_items": sum(1 for detail in details if detail["match"]),
+            "details": details,
+        }
+
+    def _maximum_compatible_pairs(
+        self,
+        expected: List[FinancialReportLine],
+        observed: List[FinancialReportLine],
+        tolerance: Decimal,
+    ) -> List[Tuple[int, int]]:
+        candidates: Dict[int, List[int]] = {}
+        for answer_index, answer_line in enumerate(expected):
+            compatible = [
+                student_index
+                for student_index, student_line in enumerate(observed)
+                if all(
+                    self._line_checks(
+                        answer_line,
+                        student_line,
+                        tolerance,
+                    ).values()
+                )
+            ]
+            candidates[answer_index] = sorted(
+                compatible,
+                key=lambda student_index: self._line_distance(
+                    answer_line,
+                    observed[student_index],
+                ),
+            )
+
+        student_to_answer: Dict[int, int] = {}
+
+        def augment(answer_index: int, seen: Set[int]) -> bool:
+            for student_index in candidates.get(answer_index, []):
+                if student_index in seen:
+                    continue
+                seen.add(student_index)
+                previous_answer = student_to_answer.get(student_index)
+                if previous_answer is None or augment(previous_answer, seen):
+                    student_to_answer[student_index] = answer_index
+                    return True
+            return False
+
+        for answer_index in sorted(
+            range(len(expected)),
+            key=lambda index: len(candidates.get(index, [])),
+        ):
+            augment(answer_index, set())
+
+        return sorted(
+            (
+                (answer_index, student_index)
+                for student_index, answer_index in student_to_answer.items()
+            ),
+            key=lambda pair: (pair[0], pair[1]),
+        )
+
+    def _minimum_distance_pairs(
+        self,
+        expected: List[FinancialReportLine],
+        observed: List[FinancialReportLine],
+        used_answer: Set[int],
+        used_student: Set[int],
+    ) -> List[Tuple[int, int]]:
+        pairs = sorted(
+            (
+                (
+                    self._line_distance(answer_line, student_line),
+                    answer_index,
+                    student_index,
+                )
+                for answer_index, answer_line in enumerate(expected)
+                if answer_index not in used_answer
+                for student_index, student_line in enumerate(observed)
+                if student_index not in used_student
+            ),
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+        result: List[Tuple[int, int]] = []
+        assigned_answers: Set[int] = set()
+        assigned_students: Set[int] = set()
+        for _, answer_index, student_index in pairs:
+            if answer_index in assigned_answers or student_index in assigned_students:
+                continue
+            result.append((answer_index, student_index))
+            assigned_answers.add(answer_index)
+            assigned_students.add(student_index)
+        return result
+
+    @staticmethod
+    def _line_checks(
+        answer: FinancialReportLine,
+        student: FinancialReportLine,
+        tolerance: Decimal,
+    ) -> Dict[str, bool]:
+        return {
+            "amount": abs(student.amount - answer.amount) <= tolerance,
+            "prev_amount": abs(student.prev_amount - answer.prev_amount)
+            <= tolerance,
+            "other_amount": abs(student.other_amount - answer.other_amount)
+            <= tolerance,
+            "other_prev_amount": abs(
+                student.other_prev_amount - answer.other_prev_amount
+            )
+            <= tolerance,
+        }
+
+    @staticmethod
+    def _line_distance(
+        answer: FinancialReportLine,
+        student: FinancialReportLine,
+    ) -> Decimal:
+        return sum(
+            (
+                abs(student.amount - answer.amount),
+                abs(student.prev_amount - answer.prev_amount),
+                abs(student.other_amount - answer.other_amount),
+                abs(student.other_prev_amount - answer.other_prev_amount),
+            ),
+            Decimal("0"),
+        )
+
     @classmethod
     def _group_lines(
         cls,
@@ -187,7 +330,9 @@ class FinancialReportsComparator(BaseModuleComparator):
         use_instance_metadata: bool,
         use_line_position: bool,
     ) -> DefaultDict[Tuple[Any, ...], List[FinancialReportLine]]:
-        groups: DefaultDict[Tuple[Any, ...], List[FinancialReportLine]] = defaultdict(list)
+        groups: DefaultDict[Tuple[Any, ...], List[FinancialReportLine]] = (
+            defaultdict(list)
+        )
         for line in lines:
             key: Tuple[Any, ...] = (line.report_type, line.item_code)
             if use_instance_metadata:
@@ -232,15 +377,6 @@ class FinancialReportsComparator(BaseModuleComparator):
             or line.sort_order is not None
             or line.category is not None
             for line in lines
-        )
-
-    @staticmethod
-    def _amount_vector(line: FinancialReportLine) -> Tuple[Decimal, ...]:
-        return (
-            line.amount,
-            line.prev_amount,
-            line.other_amount,
-            line.other_prev_amount,
         )
 
     @classmethod
